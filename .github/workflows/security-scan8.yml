@@ -1,0 +1,119 @@
+name: Security Scanning Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  semgrep-sast:
+    name: SAST Analysis with Semgrep
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        id: semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/security-audit p/secrets p/owasp-top-ten p/nodejs
+        continue-on-error: true
+
+      - name: Upload Semgrep results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-sast
+
+  trivy-filesystem:
+    name: Trivy - Dependency & Filesystem Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          scanners: 'vuln,secret,config'
+
+      - name: Upload Trivy FS results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'trivy-dependencies'
+
+  trivy-container:
+    name: Trivy - Container Image Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    if: hashFiles('Dockerfile') != ''
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t vuln-server:${{ github.sha }} .
+
+      - name: Run Trivy container scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'vuln-server:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          scanners: 'vuln,secret,config'
+
+      - name: Upload Trivy Image results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+          category: 'trivy-container'
+
+  security-summary:
+    name: Security Scan Summary
+    needs: [semgrep-sast, trivy-filesystem]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Generate Security Summary
+        run: |
+          echo "## 🔒 Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Status | Category |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔍 Semgrep | ${{ needs.semgrep-sast.result }} | SAST Analysis |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 Trivy FS | ${{ needs.trivy-filesystem.result }} | Dependencies & Secrets |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 View Results" >> $GITHUB_STEP_SUMMARY
+          echo "Check the [Security tab](https://github.com/${{ github.repository }}/security/code-scanning) for detailed findings." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Scan completed at:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
